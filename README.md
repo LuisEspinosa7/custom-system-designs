@@ -11,4 +11,4 @@ trainning as well as my portfolio.
 
 | Name    | Description |
 |---------|-------------|
-| [code-deployment-system](https://github.com/LuisEspinosa7/custom-system-designs) | Highly available code deployment system |
+| [code-deployment-system](https://github.com/LuisEspinosa7/custom-system-designs/tree/main/code-deployment-system) | Highly available code deployment system |

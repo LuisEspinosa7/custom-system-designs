@@ -17,7 +17,13 @@ Build a system that:
 This system consist of two main parts:
 
 - Build
-
+Engineers have an user interface to create the jobs, this requests are taken by the api gateway and lambdas to finally create the jobs on the 
+database. Then naturally there are an autoscaling group of workers responsible for building the binary, they will be using the FIRST DATABASE
+TRANSACTION to get the jobs in QUEUE status (available jobs), once a worker detect an available job, immediately uses the SECOND DATABASE 
+TRANSACTION to change the job status to RUNNING. Then with job details (name, repository, version, status) the code is gathered from the repository
+and the build starts. One important worker responsibility is to use the THIRD DATABASE TRANSACTION to update the heartbeat column in the job row.
+Provided the worker has build the binary successfully, the work  must use the FOURTH DATABASE TRANSACTION to update the job status to completed. 
+With the purpose of being consistent there has to be a monitor application running all the time which duty would be to get the heartbeat of all the jobs and look for times greater than 5 or 10 minutes, those cases may be taken as failures on dead workers, maybe issues with network, so on and so forth, in that specific case the monitor might use the FIFTH DATABASE TRANSACTION to update the job's status to QUEUE (so they can be taken again by oter working workers). 
 
 
 - Deploy

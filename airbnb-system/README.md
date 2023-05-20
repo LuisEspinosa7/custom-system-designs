@@ -10,6 +10,8 @@ Build a system that:
 - Allows Renters open a specific listing
 - Allows Renters reserve a listing which available (neither reserved nor booked)
 - Is efficient but memory responsible 
+- Allows 1 million listings
+- Allows 50 million users (listing and reserving)
 
 This system consist of two main parts:
 
@@ -27,6 +29,12 @@ of QUADTREE implementations will be composed of several FOLLOWERS and one and on
 assigned the responsibility of upgrading its data from the LISTINGS DATABASE whenever we have a new listing or one of them deleted 
 (Synchronous synchronization). The followers will upgrade themselves from the LEADER (Asynchronous synchronization). The following example will 
 make it clearer:
+
+We can call this a geo index, and let's see if we can fit the listings there. Assuming a single listing takes up roughly 10 KB of space (as an upper bound), some simple math confirms that we can store everything we need about listings in memory.
+
+~10 KB per listing
+~1 million listings
+~10 KB * 1000^2 = 10 GB
 
 <table style="width:100%">
   <tr>
@@ -48,7 +56,7 @@ this will use A BINARY SEARCH ON THE QUADTREE to find the listings in that locat
 QUADTREE's listing list of NOT AVAILABLE date ranges, this is to say, to look for only the listing in that area available. So for instance if one
 listing is inside the area of interest but its NOT AVAILABLE DATE RANGES (already occupied date ranges) coincide with the date ranges searched 
 by the user, that listing will be ignored or skipped. Additionally the listings will be paginated just to avoid overloading the clients with huge 
-amounts of listings, it will be controlled by an offset.
+amounts of listings, it will be controlled by an offset. Finding relevant locations should be fairly straightforward and very fast, especially since we can estimate that our quadtree will have a depth of approximately 10, since 4^10 is greater than 1 million (required listings in memory). 
 Then we have the individual loading of a listing, this is the simplest of all because it will only go through the load balancer and the cluster of 
 applications to finally look for that listing directly in the database.
 Finally we have RESERVING action from the user, this one is special, as the others it will go through the same LOAD BALANCER, then the cluster of 

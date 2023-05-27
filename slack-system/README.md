@@ -21,19 +21,16 @@ This system consist of two main parts:
 
 - Slack app loads </br>
 
-
     Seeing all of the channels that a user is a part of.
     Seeing messages in a particular channel.
     Seeing which channels have unread messages.
     Seeing which channels have unread mentions and how many they have.
 
-
-
 Databases
 <table style="width:100%">
   <tr>
     <td>
-  	<img width="950" alt="Image" src="CCC">
+  	<img width="950" alt="Image" src="https://github.com/LuisEspinosa7/custom-system-designs/assets/56041525/b80833e7-27f9-4680-ae00-bd90d8eb3a4a">
     </td>
   </tr>
 </table>
@@ -55,6 +52,8 @@ Example of new message kafka event  </br>
   "body": "this is a message",
   "mentions": ["CCC", "EEE"]
 }
+</br>
+</br>
 Example of read channel kafka event  </br>
 {
   "type": "read-receipt",
@@ -63,6 +62,7 @@ Example of read channel kafka event  </br>
   "userId": "CCC",
   "timestamp": "2020-08-31T01:17:02"
 }
+</br>
 
 All clients will be using web sockets for long TCP communication, their connections will go through a load balancer which request the smart sharding tool like ETCD to know which API SERVER to point to, right after the api server sharding id is obtained the request will go ahead a hit that server
 which of course will be listening to a specific kafka topic. When clients receive Pub/Sub messages, they'll handle them accordingly (mark a channel as unread, for example), and if the clients refresh their browser or their mobile app, they'll go through the entire "on app load" system that we described earlier.

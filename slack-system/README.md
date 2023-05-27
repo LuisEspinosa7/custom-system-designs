@@ -20,7 +20,14 @@ mentions will be on each relevant channel besides the channel name.
 This system consist of two main parts:
 
 - Slack app loads </br>
-CCCCC
+
+
+    Seeing all of the channels that a user is a part of.
+    Seeing messages in a particular channel.
+    Seeing which channels have unread messages.
+    Seeing which channels have unread mentions and how many they have.
+
+
 
 Databases
 <table style="width:100%">
@@ -33,9 +40,32 @@ Databases
 
 
 - Real-time messaging as well as cross-device synchronization. </br>
-CCCCC
+The real time communication strongly rely on pub/sub messaging supported by a smart sharding strategy. There are kafka topics per organization
+shared by size, this is to say, if an organization is really big, it will have its own shard, conversely if an organization is small it will for sure
+be sharded together along with others. Therefore, every Slack organization or group of organizations will be assigned to a Kafka topic, and whenever a user sends a message in a channel or marks a channel as read, the API servers in the cluster will send a Pub/Sub message to the appropriate Kafka topic after persisting on the database. </br>
 
+Example of new message kafka event  </br>
+{
+  "type": "chat",
+  "orgId": "AAA",
+  "channelId": "BBB",
+  "userId": "CCC",
+  "messageId": "DDD",
+  "timestamp": "2020-08-31T01:17:02",
+  "body": "this is a message",
+  "mentions": ["CCC", "EEE"]
+}
+Example of read channel kafka event  </br>
+{
+  "type": "read-receipt",
+  "orgId": "AAA",
+  "channelId": "BBB",
+  "userId": "CCC",
+  "timestamp": "2020-08-31T01:17:02"
+}
 
+All clients will be using web sockets for long TCP communication, their connections will go through a load balancer which request the smart sharding tool like ETCD to know which API SERVER to point to, right after the api server sharding id is obtained the request will go ahead a hit that server
+which of course will be listening to a specific kafka topic. When clients receive Pub/Sub messages, they'll handle them accordingly (mark a channel as unread, for example), and if the clients refresh their browser or their mobile app, they'll go through the entire "on app load" system that we described earlier.
 
 
 ### Pictures

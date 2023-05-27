@@ -20,13 +20,22 @@ mentions will be on each relevant channel besides the channel name.
 This system consist of two main parts:
 
 - Slack app loads </br>
+Whenever the application loads, all clients will send requests through a load balancer which will have communication with cluster of API Servers that interacts with the database. Since our application will handle such an amount of organizations, channels and users, it becomes a good practice to take a smart sharding approach for persisting the application data, in this case the shards will be created depending on organizations size (messages stored for each organization), we can have the biggest organizations (with the biggest channels) in their individual shards, and we can have smaller organizations grouped together in other shards. Over time, organization sizes and Slack activity within organizations will change. Some organizations might double in size overnight, others might experience seemingly random surges of activity, etc.. This means that, despite our relatively sound sharding strategy, we might still run into hot spots, which is very bad considering the fact that we care about latency so much.
+</br>
+To handle this, we can add a "smart" sharding solution: a subsystem of our system that'll asynchronously measure organization activity and "rebalance" shards accordingly. This service can be a strongly consistent key-value store like Etcd or ZooKeeper, mapping orgIds to shards. Our API servers will communicate with this service to know which shard to route requests to.
+</br>
+Since the application data is relation, therefore there will structure data to represent the business data, we'll need an storage solution in this case and SQL database. We have the following tables: </br>
+- Channels: To store the the channels </br>
+- Channel members: Holds users who is in a particular channel. We'll use this table, along with the one above, to fetch a user's relevant when the app loads. </br>
+- Messages: To store all historical messages sent on Slack. This will be our largest table, and it'll be queried every time a user fetches messages in a particular channel. The API endpoint that'll interact with this table will return a paginated response, since we'll typically only want the 50 or 100 most recent messages per channel. Also, this table will only be queried when a user clicks on a channel; we don't want to fetch messages for all of a user's channels on app load, since users will likely never look at most of their channels. </br>
+- Latest Channel Timestamps: Stores the latest activity in each channel (this table will be updated whenever a user sends a message in a channel) </br>
+- Channel Read Receipts: Stores the last time a particular user has read a channel (this table will be updated whenever a user opens a channel). </br>
+NOTE: Last two tables are meant not to fetch recent messages for every channel on app load, while supporting the feature of showing which channels have unread messages. </br>
+- Unread Channel-User-Mention Counts: For the number of unread user mentions that we want to display next to channel names, we'll have another table similar to the read-receipts one, except this one will have a count of unread user mentions instead of a timestamp. This count will be updated (incremented) whenever a user tags another user in a channel message, and it'll also be updated (reset to 0) whenever a user opens a channel with unread mentions of themself. 
 
-    Seeing all of the channels that a user is a part of.
-    Seeing messages in a particular channel.
-    Seeing which channels have unread messages.
-    Seeing which channels have unread mentions and how many they have.
+</br>
 
-Databases
+Databases </br>
 <table style="width:100%">
   <tr>
     <td>
@@ -34,7 +43,7 @@ Databases
     </td>
   </tr>
 </table>
-
+</br>
 
 - Real-time messaging as well as cross-device synchronization. </br>
 The real time communication strongly rely on pub/sub messaging supported by a smart sharding strategy. There are kafka topics per organization

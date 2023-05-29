@@ -1,87 +1,74 @@
-# Slack Core System
+# Facebook News Feed Core System
 
 ### Explanation
 This system was built with the following requirements in mind:
 Build a system that:
 - Is scalable.
 - Fast and efficient
-- Has low latency
-- Loads the most recent messages in a Slack channel when a user clicks on the channel.
-- Immediately sees which channels have unread messages for a particular user when that user loads Slack.
-- Immediately sees which channels have unread mentions of a particular user, when that user loads Slack, the number of these unread 
-mentions will be on each relevant channel besides the channel name.
-- Maintains registry of last message seen and last channel interaction.
-- Real time chating
-- Multi device synchronization
-- Allows 20 million users
-- Allows organizations with up to 50.000 users
-- Allows channels with up to 50.000 users
-
-This system consist of two main parts:
-
-- Slack app loads </br>
-Whenever the application loads, all clients will send requests through a load balancer which will have communication with cluster of API Servers that interacts with the database. Since our application will handle such an amount of organizations, channels and users, it becomes a good practice to take a smart sharding approach for persisting the application data, in this case the shards will be created depending on organizations size (messages stored for each organization), we can have the biggest organizations (with the biggest channels) in their individual shards, and we can have smaller organizations grouped together in other shards. Over time, organization sizes and Slack activity within organizations will change. Some organizations might double in size overnight, others might experience seemingly random surges of activity, etc.. This means that, despite our relatively sound sharding strategy, we might still run into hot spots, which is very bad considering the fact that we care about latency so much.
-</br>
-To handle this, we can add a "smart" sharding solution: a subsystem of our system that'll asynchronously measure organization activity and "rebalance" shards accordingly. This service can be a strongly consistent key-value store like Etcd or ZooKeeper, mapping orgIds to shards. Our API servers will communicate with this service to know which shard to route requests to.
-</br>
-Since the application data is relation, therefore there will structure data to represent the business data, we'll need an storage solution in this case and SQL database. We have the following tables: </br>
-- Channels: To store the the channels </br>
-- Channel members: Holds users who is in a particular channel. We'll use this table, along with the one above, to fetch a user's relevant when the app loads. </br>
-- Messages: To store all historical messages sent on Slack. This will be our largest table, and it'll be queried every time a user fetches messages in a particular channel. The API endpoint that'll interact with this table will return a paginated response, since we'll typically only want the 50 or 100 most recent messages per channel. Also, this table will only be queried when a user clicks on a channel; we don't want to fetch messages for all of a user's channels on app load, since users will likely never look at most of their channels. </br>
-- Latest Channel Timestamps: Stores the latest activity in each channel (this table will be updated whenever a user sends a message in a channel) </br>
-- Channel Read Receipts: Stores the last time a particular user has read a channel (this table will be updated whenever a user opens a channel). </br>
-NOTE: Last two tables are meant not to fetch recent messages for every channel on app load, while supporting the feature of showing which channels have unread messages. </br>
-- Unread Channel-User-Mention Counts: For the number of unread user mentions that we want to display next to channel names, we'll have another table similar to the read-receipts one, except this one will have a count of unread user mentions instead of a timestamp. This count will be updated (incremented) whenever a user tags another user in a channel message, and it'll also be updated (reset to 0) whenever a user opens a channel with unread mentions of themself. 
+- Has low latency through regional replication (Important)
+- Loads a user's news feed
+- Posts status updates and updates the poster's friends news feeds in real time.
+- Allows 1 billion users
+- Allows 500 friends on average for each user
+- Uses an out of the box ad server as well as a post ranking subsystem (Integration)
 
 </br>
+This system consist of two main parts: </br>
 
-Databases </br>
-<table style="width:100%">
-  <tr>
-    <td>
-  	<img width="950" alt="Image" src="https://github.com/LuisEspinosa7/custom-system-designs/assets/56041525/b80833e7-27f9-4680-ae00-bd90d8eb3a4a">
-    </td>
-  </tr>
-</table>
-</br>
+- CreatePost Request </br>
+ For the purpose of this design, the CreatePost API call will be very simple and look something like this:
+<pre>
+CreatePost(
+        user_id: string,
+        post: data
+    )
+</pre>
 
-- Real-time messaging as well as cross-device synchronization. </br>
-The real time communication strongly rely on pub/sub messaging supported by a smart sharding strategy. There are kafka topics per organization
-shared by size, this is to say, if an organization is really big, it will have its own shard, conversely if an organization is small it will for sure
-be sharded together along with others. Therefore, every Slack organization or group of organizations will be assigned to a Kafka topic, and whenever a user sends a message in a channel or marks a channel as read, the API servers in the cluster will send a Pub/Sub message to the appropriate Kafka topic after persisting on the database. </br>
+There will be one main relational database to store most of our system's data, including posts and users. This database will have very large tables (be aware that sharding HERE is not useful because of long and time-consuming queries to build the news feed). Since our databases tables are going to be so large, with billions of millions of users and tens of millions of posts every week, fetching news feeds from our main database every time a GetNewsFeed call is made isn't going to be ideal. We can't expect low latencies when building news feeds from scratch because querying our huge tables takes time, and sharding the main database holding the posts wouldn't be particularly helpful since news feeds would likely need to aggregate posts across shards, which would require us to perform cross-shard joins when generating news feeds; we want to avoid this. Instead, we can store news feeds separately from our main database across an array of shards. We can have a separate cluster of machines that can act as a proxy to the relational database and be in charge of aggregating posts, ranking them via the ranking algorithm that we're given, generating news feeds, and sending them to our shards every so often (every 5, 10, 60 minutes, depending on how often we want news feeds to be updated).
+If we average each post at 10kB, and a newsfeed comprises of the top 1000 posts that are relevant to a user, that's 10MB per user, or 10 000TB of data total. We assume that it's loaded 10 times per day per user, which averages at 10k QPS for the newsfeed fetching. </br>
 
-Example of new message kafka event  </br>
-{
-  "type": "chat",
-  "orgId": "AAA",
-  "channelId": "BBB",
-  "userId": "CCC",
-  "messageId": "DDD",
-  "timestamp": "2020-08-31T01:17:02",
-  "body": "this is a message",
-  "mentions": ["CCC", "EEE"]
-}
-</br>
-</br>
-Example of read channel kafka event  </br>
-{
-  "type": "read-receipt",
-  "orgId": "AAA",
-  "channelId": "BBB",
-  "userId": "CCC",
-  "timestamp": "2020-08-31T01:17:02"
-}
-</br>
+Assuming 1 billion news feeds (for 1 billion users) containing 1000 posts of up to 10 KB each, we can estimate that we'll need 10 PB (petabytes) of storage to store all of our users' news feeds. We can use 1000 machines of 10 TB each as our news-feed shards.
 
-All clients will be using web sockets for long TCP communication, their connections will go through a load balancer which request the smart sharding tool like ETCD to know which API SERVER to point to, right after the api server sharding id is obtained the request will go ahead a hit that server
-which of course will be listening to a specific kafka topic. When clients receive Pub/Sub messages, they'll handle them accordingly (mark a channel as unread, for example), and if the clients refresh their browser or their mobile app, they'll go through the entire "on app load" system that we described earlier.
+<pre>
+  ~10 KB per post
+  ~1000 posts per news feed
+  ~1 billion news feeds
+  ~10 KB * 1000 * 1000^3 = 10 PB = 1000 * 10 TB
+</pre>
 
+To distribute the newsfeeds roughly evenly, we can shard based on the user id. When a GetNewsFeed request comes in, it gets load balanced to the right news feed machine, which returns it by reading on local disk. If the newsfeed doesn't exist locally, we then go to the source of truth (the main database, but going through the proxy ranking service) to gather the relevant posts. This will lead to increased latency but shouldn't happen frequently. </br>
+
+* Feed Updates (Events for feed update when a post has been created)
+ We now need to have a notification mechanism that lets the feed shards know that a new relevant post was just created and that they should incorporate it into the feeds of impacted users. We can once again use a Pub/Sub service for this. Each one of the shards will subscribe to its own topic--we'll call these topics the Feed Notification Topics (FNT)--and the original subscribers S1 will be the publishers for the FNT. When S1 gets a new message about a post creation, it searches the main database for all of the users for whom this post is relevant (i.e., it searches for all of the friends of the user who created the post), it filters out users from other regions who will be taken care of asynchronously, and it maps the remaining users to the FNT using the same hashing function that our GetNewsFeed load balancers rely on. For posts that impact too many people, we can cap the number of FNT topics that get messaged to reduce the amount of internal traffic that gets generated from a single post. For those big users we can rely on the asynchronous feed creation to eventually kick in and let the post appear in feeds of users whom we've skipped when the feeds get refreshed manually. </br>
+
+When CreatePost gets called and reaches our Pub/Sub subscribers, they'll send a message to another Pub/Sub topic that some forwarder service in between regions will subscribe to. The forwarder's job will be, as its name implies, to forward messages to other regions so as to replicate all of the CreatePost logic in other regions. Once the forwarder receives the message, it'll essentially mimic what would happen if that same CreatePost were called in another region, which will start the entire feed-update logic in those other regions. We can have some additional logic passed to the forwarder to prevent other regions being replicated to from notifying other regions about the CreatePost call in question, which would lead to an infinite chain of replications; in other words, we can make it such that only the region where the post originated from is in charge of notifying other regions. </br>
+
+
+- GetNewsFeed Request </br>
+The GetNewsFeed API call will most likely look like this:
+
+<pre>
+    GetNewsFeed(
+        user_id: string,
+        pageSize: integer,
+        nextPageToken: integer,
+    ) => (
+        posts: []{
+            user_id: string,
+            post_id: string,
+            post: data,
+        },
+        nextPageToken: string,
+    )
+</pre>
+
+The pageSize and nextPageToken fields are used to paginate the newsfeed; pagination is necessary when dealing with large amounts of listed data, and since we'll likely want each news feed to have up to 1000 posts, pagination is very appropriate here. Finally, the load balancer will have the same hashing mechanism to get the userId hashed value, which is required to know where the load balancer should point to get the news feed for that user directly, this is absolutely important.
 
 ### Pictures
 <table style="width:100%">
   <tr>
     <td>
-  	<img width="950" alt="Image" src="https://github.com/LuisEspinosa7/custom-system-designs/assets/56041525/7708f71b-9bd9-4e63-a1aa-01d8fc7bb0e0">
+  	<img width="950" alt="Image" src="https://github.com/LuisEspinosa7/custom-system-designs/assets/56041525/bef1a634-4a5b-4fcc-9bf5-5e5444f2329b">
     </td>
   </tr>
 </table>

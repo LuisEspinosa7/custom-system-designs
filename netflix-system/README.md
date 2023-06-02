@@ -1,74 +1,136 @@
-# Facebook News Feed Core System
+# Netflix Core System
 
 ### Explanation
 This system was built with the following requirements in mind:
 Build a system that:
 - Is scalable.
 - Fast and efficient
-- Has low latency through regional replication (Important)
-- Loads a user's news feed
-- Posts status updates and updates the poster's friends news feeds in real time.
-- Allows 1 billion users
-- Allows 500 friends on average for each user
-- Uses an out of the box ad server as well as a post ranking subsystem (Integration)
+- Has low latency
+- Delivers large amounts of high-definition video content to hundreds of millions of users around the globe without too much buffering.
+- Process large amounts of user-activity data to support Netflix's recommendation engine.
+- Allows 200M users
+- Allows 10K videos
 
 </br>
-This system consist of two main parts: </br>
+This system consist of four main parts: </br>
 
-- CreatePost Request </br>
- For the purpose of this design, the CreatePost API call will be very simple and look something like this:
-<pre>
-CreatePost(
-        user_id: string,
-        post: data
-    )
-</pre>
+- Storage (Video Content, Static Content, and User Metadata) </br>
 
-There will be one main relational database to store most of our system's data, including posts and users. This database will have very large tables (be aware that sharding HERE is not useful because of long and time-consuming queries to build the news feed). Since our databases tables are going to be so large, with billions of millions of users and tens of millions of posts every week, fetching news feeds from our main database every time a GetNewsFeed call is made isn't going to be ideal. We can't expect low latencies when building news feeds from scratch because querying our huge tables takes time, and sharding the main database holding the posts wouldn't be particularly helpful since news feeds would likely need to aggregate posts across shards, which would require us to perform cross-shard joins when generating news feeds; we want to avoid this. Instead, we can store news feeds separately from our main database across an array of shards. We can have a separate cluster of machines that can act as a proxy to the relational database and be in charge of aggregating posts, ranking them via the ranking algorithm that we're given, generating news feeds, and sending them to our shards every so often (every 5, 10, 60 minutes, depending on how often we want news feeds to be updated).
-If we average each post at 10kB, and a newsfeed comprises of the top 1000 posts that are relevant to a user, that's 10MB per user, or 10 000TB of data total. We assume that it's loaded 10 times per day per user, which averages at 10k QPS for the newsfeed fetching. </br>
+ Since Netflix's service, which caters to millions of customers, is centered around video content, we might need a lot of storage space and a complex storage solution. Let's start by estimating how much space we'll need.
 
-Assuming 1 billion news feeds (for 1 billion users) containing 1000 posts of up to 10 KB each, we can estimate that we'll need 10 PB (petabytes) of storage to store all of our users' news feeds. We can use 1000 machines of 10 TB each as our news-feed shards.
+We were told that Netflix has about 200 million users; we can make a few assumptions about other Netflix metrics (alternatively, we can ask our interviewer for guidance here):
+
+* Netflix offers roughly 10 thousand movies and shows at any given time
+* Since movies can be up to 2+ hours in length and shows tend to be between 20 and 40 minutes per episode, we can assume an average video length of 1 hour
+* Each movie / show will have a Standard Definition version and a High Definition version. Per hour, SD will take up about 10GB of space, while HD will take about 20GB.
 
 <pre>
-  ~10 KB per post
-  ~1000 posts per news feed
-  ~1 billion news feeds
-  ~10 KB * 1000 * 1000^3 = 10 PB = 1000 * 10 TB
+~10K videos (stored in SD & HD)
+~1 hour average video length
+~10 GB/h for SD + ~20 GB/h for HD = 30 GB/h per video
+~30 GB/h * 10K videos = 300,000 GB = 300 TB
 </pre>
 
-To distribute the newsfeeds roughly evenly, we can shard based on the user id. When a GetNewsFeed request comes in, it gets load balanced to the right news feed machine, which returns it by reading on local disk. If the newsfeed doesn't exist locally, we then go to the source of truth (the main database, but going through the proxy ranking service) to gather the relevant posts. This will lead to increased latency but shouldn't happen frequently. </br>
+This number highlights the importance of estimations. Naively, one might think that Netflix stores many petabytes of video, since its core product revolves around video content; but a simple back-of-the-napkin estimation shows us that it actually stores a very modest amount of video.
 
-* Feed Updates (Events for feed update when a post has been created)
- We now need to have a notification mechanism that lets the feed shards know that a new relevant post was just created and that they should incorporate it into the feeds of impacted users. We can once again use a Pub/Sub service for this. Each one of the shards will subscribe to its own topic--we'll call these topics the Feed Notification Topics (FNT)--and the original subscribers S1 will be the publishers for the FNT. When S1 gets a new message about a post creation, it searches the main database for all of the users for whom this post is relevant (i.e., it searches for all of the friends of the user who created the post), it filters out users from other regions who will be taken care of asynchronously, and it maps the remaining users to the FNT using the same hashing function that our GetNewsFeed load balancers rely on. For posts that impact too many people, we can cap the number of FNT topics that get messaged to reduce the amount of internal traffic that gets generated from a single post. For those big users we can rely on the asynchronous feed creation to eventually kick in and let the post appear in feeds of users whom we've skipped when the feeds get refreshed manually. </br>
+This is because Netflix, unlike other servies like YouTube, Google Drive, and Facebook, has a bounded amount of video content: the movies and shows that it offers; those other services allow users to upload unlimited amounts of video.
 
-When CreatePost gets called and reaches our Pub/Sub subscribers, they'll send a message to another Pub/Sub topic that some forwarder service in between regions will subscribe to. The forwarder's job will be, as its name implies, to forward messages to other regions so as to replicate all of the CreatePost logic in other regions. Once the forwarder receives the message, it'll essentially mimic what would happen if that same CreatePost were called in another region, which will start the entire feed-update logic in those other regions. We can have some additional logic passed to the forwarder to prevent other regions being replicated to from notifying other regions about the CreatePost call in question, which would lead to an infinite chain of replications; in other words, we can make it such that only the region where the post originated from is in charge of notifying other regions. </br>
+Since we're only dealing with a few hundred terabytes of data, we can use a simple blob storage solution like S3 or GCS to reliably handle the storage and replication of Netflix's video content; we don't need a more complex data-storage solution. 
 
+Apart from video content, we'll want to store various pieces of static content for Netflix's movies and shows, including video titles, descriptions, and cast lists.
 
-- GetNewsFeed Request </br>
-The GetNewsFeed API call will most likely look like this:
+This content will be bounded in size by the size of the video content, since it'll be tied to the number of movies and shows, just like the video content, and since it'll naturally take up less space than the video data.
+
+We can easily store all of this static content in a relational database or even in a document store, and we can cache most of it in our API servers. 
+
+We can expect to store some user metadata for each video on the Netflix platform. For instance, we might want to store the timestamp that a user left a video at, a user's rating on a video, etc..
+
+Just like the static content mentioned above, this user metadata will be tied to the number of videos on Netflix. However, unlike the static content, this user metadata will grow with the Netflix userbase, since each user will have user metadata.
+
+We can quickly estimate how much space we'll need for this user metadata:
 
 <pre>
-    GetNewsFeed(
-        user_id: string,
-        pageSize: integer,
-        nextPageToken: integer,
-    ) => (
-        posts: []{
-            user_id: string,
-            post_id: string,
-            post: data,
-        },
-        nextPageToken: string,
-    )
+  ~200M users
+  ~1K videos watched per user per lifetime (~10% of total content)
+  ~100 bytes/video/user
+  ~100 bytes * 1K videos * 200M users = 100 KB * 200M = 1 GB * 20K = 20 TB
 </pre>
 
-The pageSize and nextPageToken fields are used to paginate the newsfeed; pagination is necessary when dealing with large amounts of listed data, and since we'll likely want each news feed to have up to 1000 posts, pagination is very appropriate here. Finally, the load balancer will have the same hashing mechanism to get the userId hashed value, which is required to know where the load balancer should point to get the news feed for that user directly, this is absolutely important.
+Perhaps surprisingly, we'll be storing an amount of user metadata in the same ballpark as the amount of video content that we'll be storing. Once again, this is because of the bounded nature of Netflix's video content, which is in stark contrast with the unbounded nature of its userbase.
+
+We'll likely need to query this metadata, so storing it in a classic relational database like Postgres makes sense.
+
+Since Netflix users are effectively isolated from one another (they aren't connected like they would be on a social-media platform, for example), we can expect all of our latency-sensitive database operations to only relate to individual users. In other words, potential operations like GetUserInfo and GetUserWatchedVideos, which would require fast latencies, are specific to a particular users; on the other hand, complicated database operations involving multiple users' metadata will likely be part of background data-engineering jobs that don't care about latency.
+
+Given this, we can split our user-metadata database into a handful of shards, each managing anywhere between 1 and 10 TB of indexed data. This will maintain very quick reads and writes for a given user. 
+
+
+- General Client-Server Interaction (i.e., the life of a query) </br>
+
+The part of the system that handles serving user metadata and static content to users shouldn't be too complicated.
+
+We can use some simple round-robin load balancing to distribute end-user network requests across our API servers, which can then load-balance database requests according to userId (since our database will be sharded based on userId).
+
+As mentioned above, we can cache our static content in our API servers, periodically updating it when new movies and shows are released, and we can even cache user metadata there, using a write-through caching mechanism. 
+
+- Video Content Delivery </br>
+ We need to figure out how we'll be delivering Netflix's video content across the globe with little latency. To start, we'll estimate the maximum amount of bandwidth consumption that we could expect at any point in time. We'll assume that, at peak traffic, like when a popular movie comes out, a fairly large number of Netflix users might be streaming video content concurrently.
+
+<pre>
+  ~200M total users
+  ~5% of total users streaming concurrently during peak hours
+  ~20 GB/h of HD video ~= 5 MB/s of HD video
+  ~5% of 200M * 5 MB/s = 10M * 5 MB/s = 50 TB/s 
+</pre>
+
+This level of bandwidth consumption means we can't just naively serve the video content out of a single data center or even dozens of data centers. We need many thousands of locations around the world to be distributing this content for us. Thankfully, CDNs solve this precise problem, since they have many thousands of Points of Presence around the world. We can thus use a CDN like Cloudflare and serve our video content out of the CDN's PoPs.
+
+Since the PoPs can't keep the entirety of Netflix's video content in cache, we can have an external service that periodically repopulates CDN PoPs with the most important content (the movies and shows most likely to be watched). 
+
+- User-Activity Data Processing </br>
+
+We need to figure out how we'll process vast amounts of user-activity data to feed into Netflix's recommendation engine. We can imagine that this user-activity data will be gathered in the form of logs that are generated by all sorts of user actions; we can expect terabytes of these logs to be generated every day.
+
+MapReduce can help us here. We can store the logs in a distributed file system like HDFS and run MapReduce jobs to process massive amounts of data in parallel. The results of these jobs can then be fed into some machine learning pipelines or simply stored in a database.
+Map Inputs
+
+Our Map inputs can be our raw logs, which might look like:
+
+{"userId": "userId1", "videoId": "videoId1", "event": "CLICK"}
+{"userId": "userId2", "videoId": "videoId2", "event": "PAUSE"}
+{"userId": "userId3", "videoId": "videoId3", "event": "MOUSE_MOVE"}
+
+Map Outputs / Reduce Inputs
+
+Our Map function will aggregate logs based on userId and return intermediary key-value pairs indexed on each userId, pointing to lists of tuples with videoIds and relevant events.
+
+These intermediary k/v pairs will be shuffled appropriately and fed into our Reduce functions.
+
+{"userId1": [("CLICK", "videoId1"), ("CLICK", "videoId1"), ..., ("PAUSE", "videoId2")]}
+{"userId2": [("PLAY", "videoId1"), ("MOUSE_MOVE", "videoId2"), ..., ("MINIMIZE", "videoId3")]}
+
+Reduce Outputs
+
+Our Reduce functions could return many different outputs. They could return k/v pairs for each userId|videoId combination, pointing to a computed score for that user/video pair; they could return k/v pairs indexed at each userId, pointing to lists of (videoId, score) tuples; or they could return k/v pairs also indexed at eacher userId but pointing to stack-rankings of videoIds, based on their computed score.
+
+("userId1|videoId1", score)
+("userId1|videoId2", score)
+
+OR
+
+{"userId1": [("videoId1", score), ("videoId2", score), ..., ("videoId3", score)]}
+{"userId2": [("videoId1", score), ("videoId2", score), ..., ("videoId3", score)]}  
+
+OR
+
+("userId1", ["videoId1", "videoId2", ..., "videoId3"])
+("userId2", ["videoId1", "videoId2", ..., "videoId3"])
 
 ### Pictures
 <table style="width:100%">
   <tr>
     <td>
-  	<img width="950" alt="Image" src="https://github.com/LuisEspinosa7/custom-system-designs/assets/56041525/bef1a634-4a5b-4fcc-9bf5-5e5444f2329b">
+  	<img width="950" alt="Image" src="https://github.com/LuisEspinosa7/custom-system-designs/assets/56041525/d557a6d1-7738-4fd5-b599-a44c4196709c">
     </td>
   </tr>
 </table>

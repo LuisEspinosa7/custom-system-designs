@@ -15,5 +15,4 @@ trainning as well as my portfolio.
 | [airbnb-system](https://github.com/LuisEspinosa7/custom-system-designs/tree/main/airbnb-system) | Airbnb system |
 | [slack-system](https://github.com/LuisEspinosa7/custom-system-designs/tree/main/slack-system) | Slack core system |
 | [facebook-news-feed-system](https://github.com/LuisEspinosa7/custom-system-designs/tree/main/facebook-news-feed) | Facebook news feed Core system |
-
-
+| [netflix-system](https://github.com/LuisEspinosa7/custom-system-designs/tree/main/netflix-system) | Netflix core system |

@@ -16,3 +16,6 @@ trainning as well as my portfolio.
 | [slack-system](https://github.com/LuisEspinosa7/custom-system-designs/tree/main/slack-system) | Slack core system |
 | [facebook-news-feed-system](https://github.com/LuisEspinosa7/custom-system-designs/tree/main/facebook-news-feed) | Facebook news feed Core system |
 | [netflix-system](https://github.com/LuisEspinosa7/custom-system-designs/tree/main/netflix-system) | Netflix core system |
+| [google-drive-system](https://github.com/LuisEspinosa7/custom-system-designs/tree/main/google-drive-system) | Google Drive core system |
+
+

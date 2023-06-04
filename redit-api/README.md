@@ -1,136 +1,133 @@
-# Netflix Core System
+# Redit API
 
 ### Explanation
 This system was built with the following requirements in mind:
 Build a system that:
 - Is scalable.
 - Fast and efficient
-- Has low latency
-- Delivers large amounts of high-definition video content to hundreds of millions of users around the globe without too much buffering.
-- Process large amounts of user-activity data to support Netflix's recommendation engine.
-- Allows 200M users
-- Allows 10K videos
+- Allow users write posts on subreddits, comment on posts, and upvote / downvote posts and comments.
+- Allow to manage three entities (Posts, Comments, and Votes)
+- Allow users to buy and give awards on Reddit.
 
 </br>
-This system consist of four main parts: </br>
 
-- Storage (Video Content, Static Content, and User Metadata) </br>
+1. Coming Up With A Plan </br>
+The first major point of contention is whether to store votes only on Comments and Posts, and to cast votes by calling the EditComment and EditPost methods, or whether to store them as entirely separate entities--siblings of Posts and Comments, so to speak. Storing them as separate entities makes it much more straightforward to edit or remove a particular user's votes (by just calling EditVote, for instance), so we'll go with this approach.
 
- Since Netflix's service, which caters to millions of customers, is centered around video content, we might need a lot of storage space and a complex storage solution. Let's start by estimating how much space we'll need.
+We can then plan to tackle Posts, Comments, and Votes in this order, since they'll likely share some common structure. </br> 
 
-We were told that Netflix has about 200 million users; we can make a few assumptions about other Netflix metrics (alternatively, we can ask our interviewer for guidance here):
+2. Posts
+Posts will have an id, the id of their creator (i.e., the user who writes them), the id of the subreddit that they're on, a description and a title, and a timestamp of when they're created.
 
-* Netflix offers roughly 10 thousand movies and shows at any given time
-* Since movies can be up to 2+ hours in length and shows tend to be between 20 and 40 minutes per episode, we can assume an average video length of 1 hour
-* Each movie / show will have a Standard Definition version and a High Definition version. Per hour, SD will take up about 10GB of space, while HD will take about 20GB.
+Posts will also have a count of their votes, comments, and awards, to be displayed on the UI. We can imagine that some backend service will be calculating or updating these numbers when some of the Comment, Vote, and Award CRUD operations are performed.
 
-<pre>
-~10K videos (stored in SD & HD)
-~1 hour average video length
-~10 GB/h for SD + ~20 GB/h for HD = 30 GB/h per video
-~30 GB/h * 10K videos = 300,000 GB = 300 TB
-</pre>
-
-This number highlights the importance of estimations. Naively, one might think that Netflix stores many petabytes of video, since its core product revolves around video content; but a simple back-of-the-napkin estimation shows us that it actually stores a very modest amount of video.
-
-This is because Netflix, unlike other servies like YouTube, Google Drive, and Facebook, has a bounded amount of video content: the movies and shows that it offers; those other services allow users to upload unlimited amounts of video.
-
-Since we're only dealing with a few hundred terabytes of data, we can use a simple blob storage solution like S3 or GCS to reliably handle the storage and replication of Netflix's video content; we don't need a more complex data-storage solution. 
-
-Apart from video content, we'll want to store various pieces of static content for Netflix's movies and shows, including video titles, descriptions, and cast lists.
-
-This content will be bounded in size by the size of the video content, since it'll be tied to the number of movies and shows, just like the video content, and since it'll naturally take up less space than the video data.
-
-We can easily store all of this static content in a relational database or even in a document store, and we can cache most of it in our API servers. 
-
-We can expect to store some user metadata for each video on the Netflix platform. For instance, we might want to store the timestamp that a user left a video at, a user's rating on a video, etc..
-
-Just like the static content mentioned above, this user metadata will be tied to the number of videos on Netflix. However, unlike the static content, this user metadata will grow with the Netflix userbase, since each user will have user metadata.
-
-We can quickly estimate how much space we'll need for this user metadata:
+Lastly, Posts will have optional deletedAt and currentVote fields. Subreddits display posts that have been removed with a special message; we can use the deletedAt field to accomplish this. The currentVote field will be used to display to a user whether or not they've cast a vote on a post. This field will likely be populated by the backend upon fetching Posts or when casting Votes.</br>
 
 <pre>
-  ~200M users
-  ~1K videos watched per user per lifetime (~10% of total content)
-  ~100 bytes/video/user
-  ~100 bytes * 1K videos * 200M users = 100 KB * 200M = 1 GB * 20K = 20 TB
+    postId: string
+    creatorId: string
+    subredditId: string
+    title: string
+    description: string
+    createdAt: timestamp
+    votesCount: int
+    commentsCount: int
+    awardsCount: int
+    deletedAt?: timestamp
+    currentVote?: enum UP/DOWN
 </pre>
 
-Perhaps surprisingly, we'll be storing an amount of user metadata in the same ballpark as the amount of video content that we'll be storing. Once again, this is because of the bounded nature of Netflix's video content, which is in stark contrast with the unbounded nature of its userbase.
-
-We'll likely need to query this metadata, so storing it in a classic relational database like Postgres makes sense.
-
-Since Netflix users are effectively isolated from one another (they aren't connected like they would be on a social-media platform, for example), we can expect all of our latency-sensitive database operations to only relate to individual users. In other words, potential operations like GetUserInfo and GetUserWatchedVideos, which would require fast latencies, are specific to a particular users; on the other hand, complicated database operations involving multiple users' metadata will likely be part of background data-engineering jobs that don't care about latency.
-
-Given this, we can split our user-metadata database into a handful of shards, each managing anywhere between 1 and 10 TB of indexed data. This will maintain very quick reads and writes for a given user. 
-
-
-- General Client-Server Interaction (i.e., the life of a query) </br>
-
-The part of the system that handles serving user metadata and static content to users shouldn't be too complicated.
-
-We can use some simple round-robin load balancing to distribute end-user network requests across our API servers, which can then load-balance database requests according to userId (since our database will be sharded based on userId).
-
-As mentioned above, we can cache our static content in our API servers, periodically updating it when new movies and shows are released, and we can even cache user metadata there, using a write-through caching mechanism. 
-
-- Video Content Delivery </br>
- We need to figure out how we'll be delivering Netflix's video content across the globe with little latency. To start, we'll estimate the maximum amount of bandwidth consumption that we could expect at any point in time. We'll assume that, at peak traffic, like when a popular movie comes out, a fairly large number of Netflix users might be streaming video content concurrently.
+Our CreatePost, EditPost, GetPost, and DeletePost methods will be very straightforward. One thing to note, however, is that all of these operations will take in the userId of the user performing them; this id, which will likely contain authentication information, will be used for ACL checks to see if the user performing the operations has the necessary permission(s) to do so.
 
 <pre>
-  ~200M total users
-  ~5% of total users streaming concurrently during peak hours
-  ~20 GB/h of HD video ~= 5 MB/s of HD video
-  ~5% of 200M * 5 MB/s = 10M * 5 MB/s = 50 TB/s 
+CreatePost(userId: string, subredditId: string, title: string, description: string)
+  => Post
+
+EditPost(userId: string, postId: string, title: string, description: string)
+  => Post
+
+GetPost(userId: string, postId: string)
+  => Post
+
+DeletePost(userId: string, postId: string)
+  => Post
 </pre>
 
-This level of bandwidth consumption means we can't just naively serve the video content out of a single data center or even dozens of data centers. We need many thousands of locations around the world to be distributing this content for us. Thankfully, CDNs solve this precise problem, since they have many thousands of Points of Presence around the world. We can thus use a CDN like Cloudflare and serve our video content out of the CDN's PoPs.
+Since we can expect to have hundreds, if not thousands, of posts on a given subreddit, our ListPosts method will have to be paginated. The method will take in optional pageSize and pageToken parameters and will return a list of posts of at most length pageSize as well as a nextPageToken--the token to be fed to the method to retrieve the next page of posts.
 
-Since the PoPs can't keep the entirety of Netflix's video content in cache, we can have an external service that periodically repopulates CDN PoPs with the most important content (the movies and shows most likely to be watched). 
+<pre>
+ListPosts(userId: string, subredditId: string, pageSize?: int, pageToken?: string)
+  => (Post[], nextPageToken?)
+</pre>
+</br>
 
-- User-Activity Data Processing </br>
+3. Comments
+Comments will be similar to Posts. They'll have an id, the id of their creator (i.e., the user who writes them), the id of the post that they're on, a content string, and the same other fields as Posts have. The only difference is that Comments will also have an optional parentId pointing to the parent post or parent comment of the comment. This id will allow the Reddit UI to reconstruct Comment trees to properly display (indent) replies. The UI can also sort comments within a reply thread by their createdAt timestamps or by their votesCount.
 
-We need to figure out how we'll process vast amounts of user-activity data to feed into Netflix's recommendation engine. We can imagine that this user-activity data will be gathered in the form of logs that are generated by all sorts of user actions; we can expect terabytes of these logs to be generated every day.
+<pre>
+    commentId: string
+    creatorId: string
+    postId: string
+    createdAt: timestamp
+    content: string
+    votesCount: int
+    awardsCount: int
+    parentId?: string
+    deletedAt?: timestamp
+    currentVote?: enum UP/DOWN
+</pre>
 
-MapReduce can help us here. We can store the logs in a distributed file system like HDFS and run MapReduce jobs to process massive amounts of data in parallel. The results of these jobs can then be fed into some machine learning pipelines or simply stored in a database.
-Map Inputs
+Our CRUD operations for Comments will be very similar to those for Posts, except that the CreateComment method will also take in an optional parentId pointing to the comment that it's replying to, if relevant.
 
-Our Map inputs can be our raw logs, which might look like:
+<pre>
+CreateComment(userId: string, postId: string, content: string, parentId?: string)
+  => Comment
 
-{"userId": "userId1", "videoId": "videoId1", "event": "CLICK"}
-{"userId": "userId2", "videoId": "videoId2", "event": "PAUSE"}
-{"userId": "userId3", "videoId": "videoId3", "event": "MOUSE_MOVE"}
+EditComment(userId: string, commentId: string, content: string)
+  => Comment
 
-Map Outputs / Reduce Inputs
+GetComment(userId: string, commentId: string)
+  => Comment
 
-Our Map function will aggregate logs based on userId and return intermediary key-value pairs indexed on each userId, pointing to lists of tuples with videoIds and relevant events.
+DeleteComment(userId: string, commentId: string)
+  => Comment
 
-These intermediary k/v pairs will be shuffled appropriately and fed into our Reduce functions.
+ListComments(userId: string, postId: string, pageSize?: int, pageToken?: string)
+  => (Comment[], nextPageToken?)
+</pre>
 
-{"userId1": [("CLICK", "videoId1"), ("CLICK", "videoId1"), ..., ("PAUSE", "videoId2")]}
-{"userId2": [("PLAY", "videoId1"), ("MOUSE_MOVE", "videoId2"), ..., ("MINIMIZE", "videoId3")]}
+4. Votes
+Votes will have an id, the id of their creator (i.e., user who casts them), the id of their target (i.e., the post or comment that they're on), and a type, which will be a simple UP/DOWN enum. They could also have a createdAt timestamp for good measure.</br>
 
-Reduce Outputs
+<pre>
+    voteId: string
+    creatorId: string
+    targetId: string
+    type: enum UP/DOWN
+    createdAt: timestamp
+</pre>
 
-Our Reduce functions could return many different outputs. They could return k/v pairs for each userId|videoId combination, pointing to a computed score for that user/video pair; they could return k/v pairs indexed at each userId, pointing to lists of (videoId, score) tuples; or they could return k/v pairs also indexed at eacher userId but pointing to stack-rankings of videoIds, based on their computed score.
+Since it doesn't seem like getting a single vote or listing votes would be very useful for our feature, we'll skip designing those endpoints (though they would be straightforward).
 
-("userId1|videoId1", score)
-("userId1|videoId2", score)
+Our CreateVote, EditVote, and DeleteVote methods will be simple and useful. The CreateVote method will be used when a user casts a new vote on a post or comment; the EditVote method will be used when a user has already cast a vote on a post or comment and casts the opposite vote on that same post or comment; and the DeleteVote method will be used when a user has already cast a vote on a post or comment and just removes that same vote.</br>
 
-OR
+<pre>
+CreateVote(userId: string, targetId: string, type: enum UP/DOWN)
+  => Vote
 
-{"userId1": [("videoId1", score), ("videoId2", score), ..., ("videoId3", score)]}
-{"userId2": [("videoId1", score), ("videoId2", score), ..., ("videoId3", score)]}  
+EditVote(userId: string, voteId: string, type: enum UP/DOWN)
+  => Vote
 
-OR
+DeleteVote(userId: string, voteId: string)
+  => Vote
+</pre>
 
-("userId1", ["videoId1", "videoId2", ..., "videoId3"])
-("userId2", ["videoId1", "videoId2", ..., "videoId3"])
+5. Awards
+We can define two simple endpoints to handle buying and giving awards. The endpoint to buy awards will take in a paymentToken, which will be a string that contains all of the necessary information to process a payment. The endpoint to give an award will take in a targetId, which will be the id of the post or comment that the award is being given to. </br>
 
-### Pictures
-<table style="width:100%">
-  <tr>
-    <td>
-  	<img width="950" alt="Image" src="https://github.com/LuisEspinosa7/custom-system-designs/assets/56041525/d557a6d1-7738-4fd5-b599-a44c4196709c">
-    </td>
-  </tr>
-</table>
+<pre>
+BuyAwards(userId: string, paymentToken: string, quantity: int)
+
+GiveAward(userId: string, targetId: string)
+</pre>
+
